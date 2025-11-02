@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="description" content="Gringotts - A secure, anonymous platform for women's safety reporting and community support">
+    <meta name="description" content="Gringotts - A secure, anonymous platform for Gringotts reporting and community support">
     <meta name="theme-color" content="#6B7FD7">
-    <title>{% block title %}Gringotts - Women's Safety App{% endblock %}</title>
+    <title>{% block title %}Gringotts{% endblock %}</title>
     
     <!-- Skip to content for accessibility -->
     <a href="#main-content" class="skip-link">Skip to main content</a>
@@ -879,5 +879,8 @@
             }
         });
     </script>
+
+    <!-- Onboarding Overlay -->
+    {% include 'onboarding.html' %}
 </body>
 </html>

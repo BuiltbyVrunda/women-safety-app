@@ -14,10 +14,33 @@ bp = Blueprint('main', __name__)
 # Gemini API configuration (read from environment). Never hardcode keys.
 def _gemini_url():
     key = os.environ.get('GEMINI_API_KEY')
-    model = os.environ.get('GEMINI_MODEL', 'gemini-1.5-flash')
+    model = os.environ.get('GEMINI_MODEL', 'gemini-1.5-flash-latest')
+    api_ver = os.environ.get('GEMINI_API_VERSION', 'v1')  # default to v1 for wider model support
     if not key:
         return None
-    return f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}'
+    return f'https://generativelanguage.googleapis.com/{api_ver}/models/{model}:generateContent?key={key}'
+
+@bp.route('/api/ai-status')
+def ai_status():
+    """Quick diagnostic to verify Gemini connectivity and config. Returns status JSON without user content."""
+    url = _gemini_url()
+    if not url:
+        return jsonify({'success': False, 'provider': 'gemini', 'configured': False, 'error': 'GEMINI_API_KEY not set'}), 200
+    try:
+        payload = {
+            "contents": [{"parts": [{"text": "Say OK."}]}],
+            "generationConfig": {"maxOutputTokens": 4}
+        }
+        resp = requests.post(url, headers={'Content-Type': 'application/json'}, json=payload, timeout=15)
+        info = {'status': resp.status_code, 'text': None}
+        try:
+            info['json'] = resp.json()
+        except Exception:
+            info['text'] = resp.text[:500]
+        ok = resp.status_code == 200 and info.get('json', {}).get('candidates')
+        return jsonify({'success': bool(ok), 'provider': 'gemini', 'configured': True, 'response': info})
+    except Exception as e:
+        return jsonify({'success': False, 'provider': 'gemini', 'configured': True, 'error': str(e)}), 200
 
 def _rule_based_support_reply(user_message: str):
     msg = (user_message or '').lower()
@@ -1495,61 +1518,53 @@ def support_chat():
 
 @bp.route('/api/chat', methods=['POST'])
 def chat_api():
-    """Handle chat messages and return AI responses"""
-    data = request.get_json()
-    user_message = data.get('message', '').strip()
-    
+    """Handle chat messages and return AI responses. Maintains a short session history for more conversational replies."""
+    data = request.get_json(silent=True) or {}
+    user_message = (data.get('message') or '').strip()
+    persona = (data.get('persona') or '').strip()
+
     if not user_message:
         return jsonify({'success': False, 'error': 'Message cannot be empty'}), 400
-    
-    # Build empathetic AI prompt
-    system_context = """You are SafeSpace Support, a compassionate AI counselor specialized in women's safety and emotional support. Your role:
 
-1. EMOTIONAL SUPPORT:
-   - Listen with empathy and validate feelings
-   - Provide comfort during difficult times
-   - Never judge or minimize experiences
-   - Use warm, caring language
+    # Maintain minimal chat history in session (last 6 turns)
+    history = session.get('chat_history', [])
+    if not isinstance(history, list):
+        history = []
+    # Build empathetic AI context and include brief history for continuity
+    system_context = (
+        "You are SafeSpace Support, a compassionate assistant for women's safety and emotional support. "
+        "Be warm, validating, and practical. Keep replies concise (2-5 sentences). "
+        "If the user may be in danger, gently suggest calling 181 (Women Helpline) or 100 (Police). "
+        + (f"For tone, you are roleplaying as the user's {persona} calling them." if persona else "")
+    )
 
-2. SAFETY GUIDANCE:
-   - Offer practical safety tips for various situations
-   - Suggest de-escalation strategies
-   - Provide resources and helpline information
-   - Help create safety plans
+    def _format_history(hist):
+        lines = []
+        for turn in hist[-6:]:
+            u = (turn.get('user') or '').strip()
+            a = (turn.get('ai') or '').strip()
+            if u:
+                lines.append(f"User: {u}")
+            if a:
+                lines.append(f"Assistant: {a}")
+        return "\n".join(lines)
 
-3. EMPOWERMENT:
-   - Encourage seeking help when needed
-   - Reinforce that what happened is not their fault
-   - Build confidence and resilience
-   - Respect their choices and autonomy
+    prompt = (
+        f"{system_context}\n\n"
+        f"Conversation so far (most recent first may be omitted):\n{_format_history(history)}\n\n"
+        f"User: {user_message}\n\n"
+        "Assistant (empathetic, concise, helpful):"
+    )
 
-4. BOUNDARIES:
-   - You're not a replacement for professional therapy or emergency services
-   - For immediate danger, always advise calling 181 (Women Helpline) or 100 (Police)
-   - For serious trauma, recommend professional counseling
-   - Keep responses concise (3-5 sentences usually)
-
-Respond with empathy, practical advice, and hope. Be a supportive friend."""
-
-    prompt = f"""{system_context}
-
-User: {user_message}
-
-Response (be warm, supportive, and helpful):"""
-    
     url = _gemini_url()
     if url:
         try:
             payload = {
-                "contents": [{
-                    "parts": [{
-                        "text": prompt
-                    }]
-                }],
+                "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
                     "temperature": 0.8,
                     "topK": 40,
-                    "topP": 0.95,
+                    "topP": 0.9,
                     "maxOutputTokens": 400
                 }
             }
@@ -1562,8 +1577,17 @@ Response (be warm, supportive, and helpful):"""
             if response.status_code == 200:
                 result = response.json()
                 if 'candidates' in result and len(result['candidates']) > 0:
-                    ai_response = result['candidates'][0]['content']['parts'][0]['text']
-                    return jsonify({'success': True, 'message': ai_response.strip()})
+                    ai_response = result['candidates'][0]['content']['parts'][0]['text'].strip()
+                    # Update history
+                    history.append({'user': user_message, 'ai': ai_response})
+                    session['chat_history'] = history[-6:]
+                    return jsonify({'success': True, 'message': ai_response, 'provider': 'gemini'})
+            else:
+                # Log non-200 for diagnosis
+                try:
+                    print(f"Gemini non-200: {response.status_code} -> {response.text[:400]}")
+                except Exception:
+                    pass
         except requests.exceptions.Timeout:
             return jsonify({'success': False, 'message': "The response is taking longer than expected. Please try again or call 181 for immediate help."}), 500
         except Exception as e:
@@ -1571,7 +1595,9 @@ Response (be warm, supportive, and helpful):"""
 
     # Rule-based fallback (works offline without API key)
     fallback = _rule_based_support_reply(user_message)
-    return jsonify({'success': True, 'message': fallback})
+    history.append({'user': user_message, 'ai': fallback})
+    session['chat_history'] = history[-6:]
+    return jsonify({'success': True, 'message': fallback, 'provider': 'fallback'})
 
 # ============ SAFE ROUTES FEATURE ============
 import pandas as pd

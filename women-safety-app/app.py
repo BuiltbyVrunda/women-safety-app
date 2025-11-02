@@ -12,7 +12,7 @@ from math import radians, cos, sin, asin, sqrt, atan2
 import hashlib
 from sqlalchemy import text
 
-load_dotenv()
+load_dotenv()  # ensure .env variables (e.g., GEMINI_API_KEY) are loaded in dev
 
 import os
 base_dir = os.path.dirname(os.path.abspath(__file__))
